@@ -31,12 +31,16 @@ function renderHeader(state) {
 }
 
 function renderBattery(battery) {
-  for (const part of ['left', 'right', 'case']) {
+  // Headphones report one battery ('stereo') instead of left/right/case.
+  const single = Boolean(battery.stereo);
+  for (const part of ['left', 'right', 'stereo', 'case']) {
     const el = $(`.bud[data-part="${part}"]`);
     const info = battery[part];
     // No case data (e.g. case closed or out of range): drop the column so the
     // buds sit centred. Missing buds stay visible but dimmed.
     if (part === 'case') el.hidden = !info;
+    else if (part === 'stereo') el.hidden = !single;
+    else el.hidden = single;
     el.classList.toggle('unavailable', !info);
     el.classList.toggle('charging', Boolean(info?.charging));
     el.classList.toggle('low', Boolean(info && !info.charging && info.level <= LOW_BATTERY));

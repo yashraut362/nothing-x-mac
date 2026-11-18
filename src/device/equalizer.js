@@ -33,6 +33,8 @@ class Equalizer {
     this.state = state;
     this.customTimer = null;
     this.lastLocalCustomAt = 0;
+    // Advanced EQ status: true/false once read; stays null on models without it.
+    this.advancedEq = null;
 
     this.confirm = new ConfirmedSetting({
       read: () => this.send(this.#commands().get),
@@ -43,12 +45,18 @@ class Equalizer {
 
   onConnected(startDelayMs = 0) {
     const eq = this.capabilities().eq;
+    this.advancedEq = null;
     setTimeout(() => this.send(this.#commands().get), startDelayMs);
+    setTimeout(() => this.send(Command.GET_ADVANCED_EQ), startDelayMs + 75);
     if (eq.customId !== null) setTimeout(() => this.send(Command.GET_CUSTOM_EQ), startDelayMs + 150);
   }
 
   // Returns true if the frame belonged to the equalizer.
   handle(frame) {
+    if (Response.ADVANCED_EQ.includes(frame.command)) {
+      this.advancedEq = frame.payload[0] === 1;
+      return true;
+    }
     if (Response.EQ_PRESET.includes(frame.command)) {
       const preset = decodePreset(frame.payload);
       if (this.confirm.accept(preset)) this.patch({ preset, pending: false });
@@ -66,9 +74,10 @@ class Equalizer {
 
   setPreset(id) {
     const eq = this.capabilities().eq;
-    if (this.confirm.pending || id === this.state().preset) return;
+    if (this.confirm.pending || (id === this.state().preset && !this.advancedEq)) return;
     if (!eq.presets.some((p) => p.id === id)) return;
 
+    this.#disableAdvancedEq();
     this.send(this.#commands().set, encodePreset(id));
     this.confirm.begin(id);
     this.patch({ preset: id, pending: true });
@@ -92,6 +101,7 @@ class Equalizer {
 
     clearTimeout(this.customTimer);
     this.customTimer = setTimeout(() => {
+      this.#disableAdvancedEq();
       this.send(Command.SET_CUSTOM_EQ, encodeCustomEq(next, eq.trebleHz));
     }, CUSTOM_SEND_DELAY_MS);
   }
@@ -99,6 +109,13 @@ class Equalizer {
   reset() {
     this.confirm.reset();
     clearTimeout(this.customTimer);
+  }
+
+  // Presets and the custom EQ only take effect with Advanced EQ off.
+  #disableAdvancedEq() {
+    if (!this.advancedEq) return;
+    this.send(Command.SET_ADVANCED_EQ, [0x00, 0x00]);
+    this.advancedEq = false;
   }
 
   #commands() {

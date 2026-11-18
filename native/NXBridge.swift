@@ -14,6 +14,7 @@
 
 import Foundation
 import IOBluetooth
+import CoreBluetooth
 
 // Nothing / CMF control service (SPP over RFCOMM).
 let serviceUUIDBytes: [UInt8] = [
@@ -21,6 +22,13 @@ let serviceUUIDBytes: [UInt8] = [
     0x84, 0x3A, 0x34, 0x48, 0x7C, 0xF1, 0x33, 0xEB,
 ]
 let scanInterval: TimeInterval = 3
+
+// Newer models (e.g. Headphone (1) Pro) don't offer the SPP service above.
+// They carry the same 0x55-framed protocol over a BLE GATT service instead:
+// commands are written to one characteristic, replies arrive as notifications.
+let bleServiceUUID = CBUUID(string: "FD90")
+let bleWriteUUID = CBUUID(string: "68745353-1810-4B13-83A2-C1B21B652C9B")
+let bleNotifyUUID = CBUUID(string: "CA235943-1810-45E6-8326-FC8CA3BC45CE")
 
 func emit(_ object: [String: Any]) {
     guard let data = try? JSONSerialization.data(withJSONObject: object) else { return }
@@ -48,6 +56,129 @@ func bytes(fromHex hex: String) -> [UInt8]? {
     return out
 }
 
+// Control link over BLE GATT for models without the SPP service.
+final class BLELink: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
+    private var central: CBCentralManager!
+    private var peripheral: CBPeripheral?
+    private var writeChar: CBCharacteristic?
+    private(set) var isReady = false
+    var onConnected: ((String, String) -> Void)?
+    var onData: ((Data) -> Void)?
+    var onDisconnected: (() -> Void)?
+
+    override init() {
+        super.init()
+        central = CBCentralManager(delegate: self, queue: .main)
+    }
+
+    var isBusy: Bool { peripheral != nil }
+
+    // Pick up headphones already connected to the Mac that offer the service.
+    func tryConnect() {
+        guard central.state == .poweredOn, peripheral == nil else { return }
+        guard let found = central.retrieveConnectedPeripherals(withServices: [bleServiceUUID]).first else { return }
+        peripheral = found
+        found.delegate = self
+        central.connect(found)
+    }
+
+    func write(_ data: Data) {
+        guard isReady, let peripheral, let writeChar else { return }
+        let type: CBCharacteristicWriteType =
+            writeChar.properties.contains(.write) ? .withResponse : .withoutResponse
+        let chunkSize = max(20, peripheral.maximumWriteValueLength(for: type))
+        var offset = 0
+        while offset < data.count {
+            let end = min(offset + chunkSize, data.count)
+            peripheral.writeValue(data.subdata(in: offset..<end), for: writeChar, type: type)
+            offset = end
+        }
+    }
+
+    // Only drops this app's use of the link; the audio connection stays up.
+    func disconnect() {
+        if let peripheral { central.cancelPeripheralConnection(peripheral) }
+        reset()
+    }
+
+    private func reset() {
+        peripheral = nil
+        writeChar = nil
+        isReady = false
+    }
+
+    // MARK: CBCentralManagerDelegate
+
+    func centralManagerDidUpdateState(_ central: CBCentralManager) {
+        if central.state == .unauthorized { log("Bluetooth LE access not authorized") }
+        if central.state != .poweredOn, peripheral != nil {
+            let wasReady = isReady
+            reset()
+            if wasReady { onDisconnected?() }
+        }
+    }
+
+    func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {
+        peripheral.discoverServices([bleServiceUUID])
+    }
+
+    func centralManager(_ central: CBCentralManager, didFailToConnect peripheral: CBPeripheral, error: Error?) {
+        log("BLE connect failed: \(error?.localizedDescription ?? "unknown")")
+        reset()
+    }
+
+    func centralManager(_ central: CBCentralManager, didDisconnectPeripheral peripheral: CBPeripheral, error: Error?) {
+        guard peripheral === self.peripheral else { return }
+        let wasReady = isReady
+        reset()
+        if wasReady { onDisconnected?() }
+    }
+
+    // MARK: CBPeripheralDelegate
+
+    func peripheral(_ peripheral: CBPeripheral, didDiscoverServices error: Error?) {
+        guard let service = peripheral.services?.first(where: { $0.uuid == bleServiceUUID }) else {
+            log("BLE control service missing")
+            disconnect()
+            return
+        }
+        peripheral.discoverCharacteristics([bleWriteUUID, bleNotifyUUID], for: service)
+    }
+
+    func peripheral(_ peripheral: CBPeripheral, didDiscoverCharacteristicsFor service: CBService, error: Error?) {
+        let chars = service.characteristics ?? []
+        guard let write = chars.first(where: { $0.uuid == bleWriteUUID }),
+              let notify = chars.first(where: { $0.uuid == bleNotifyUUID }) else {
+            log("BLE control characteristics missing")
+            disconnect()
+            return
+        }
+        writeChar = write
+        peripheral.setNotifyValue(true, for: notify)
+    }
+
+    func peripheral(_ peripheral: CBPeripheral, didUpdateNotificationStateFor characteristic: CBCharacteristic, error: Error?) {
+        guard characteristic.uuid == bleNotifyUUID else { return }
+        if let error {
+            log("BLE notify failed: \(error.localizedDescription)")
+            disconnect()
+            return
+        }
+        guard !isReady else { return }
+        isReady = true
+        onConnected?(peripheral.name ?? "Headphones", peripheral.identifier.uuidString)
+    }
+
+    func peripheral(_ peripheral: CBPeripheral, didUpdateValueFor characteristic: CBCharacteristic, error: Error?) {
+        guard characteristic.uuid == bleNotifyUUID, let value = characteristic.value, !value.isEmpty else { return }
+        onData?(value)
+    }
+
+    func peripheral(_ peripheral: CBPeripheral, didWriteValueFor characteristic: CBCharacteristic, error: Error?) {
+        if let error { log("BLE write failed: \(error.localizedDescription)") }
+    }
+}
+
 final class Bridge: NSObject, IOBluetoothRFCOMMChannelDelegate {
     private var channel: IOBluetoothRFCOMMChannel?
     private var device: IOBluetoothDevice?
@@ -56,6 +187,20 @@ final class Bridge: NSObject, IOBluetoothRFCOMMChannelDelegate {
     private var linkResetDone = Set<String>()
     private var shuttingDown = false
     private let serviceUUID = IOBluetoothSDPUUID(bytes: serviceUUIDBytes, length: 16)
+    private let ble = BLELink()
+
+    override init() {
+        super.init()
+        ble.onConnected = { name, id in
+            emit(["type": "connected", "name": name, "address": id])
+        }
+        ble.onData = { data in
+            data.withUnsafeBytes { raw in
+                emit(["type": "data", "hex": hexString(raw.bindMemory(to: UInt8.self))])
+            }
+        }
+        ble.onDisconnected = { emit(["type": "disconnected"]) }
+    }
 
     func start() {
         scan()
@@ -66,8 +211,11 @@ final class Bridge: NSObject, IOBluetoothRFCOMMChannelDelegate {
 
     // Look for a connected paired device that offers the control service.
     private func scan() {
-        guard channel == nil, !shuttingDown else { return }
-        guard let paired = IOBluetoothDevice.pairedDevices() as? [IOBluetoothDevice] else { return }
+        guard channel == nil, !ble.isBusy, !shuttingDown else { return }
+        guard let paired = IOBluetoothDevice.pairedDevices() as? [IOBluetoothDevice] else {
+            ble.tryConnect()
+            return
+        }
 
         for candidate in paired where candidate.isConnected() {
             guard let record = candidate.getServiceRecord(for: serviceUUID) else {
@@ -101,6 +249,9 @@ final class Bridge: NSObject, IOBluetoothRFCOMMChannelDelegate {
             ])
             return
         }
+
+        // No connected device offers the SPP service: try the BLE control link.
+        ble.tryConnect()
     }
 
     // Opening usually fails because the earbuds still hold a channel from an
@@ -136,12 +287,17 @@ final class Bridge: NSObject, IOBluetoothRFCOMMChannelDelegate {
             channel.setDelegate(nil)
             channel.close()
         }
+        ble.disconnect()
         // Give the Bluetooth stack a moment to send the disconnect.
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { exit(0) }
     }
 
     func write(hex: String) {
-        guard let channel, var data = bytes(fromHex: hex), !data.isEmpty else { return }
+        guard var data = bytes(fromHex: hex), !data.isEmpty else { return }
+        guard let channel else {
+            ble.write(Data(data))
+            return
+        }
         let status = data.withUnsafeMutableBytes { buffer in
             channel.writeSync(buffer.baseAddress, length: UInt16(buffer.count))
         }

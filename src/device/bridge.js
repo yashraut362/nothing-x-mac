@@ -7,6 +7,7 @@ const readline = require('node:readline');
 const path = require('node:path');
 
 const STOP_TIMEOUT_MS = 2_000;
+const DEBUG = !!process.env.NXM_DEBUG;
 
 function bridgeBinaryPath() {
   // Packaged builds should ship the helper under Resources; dev uses build/.
@@ -57,6 +58,7 @@ class BluetoothBridge extends EventEmitter {
   write(bytes) {
     if (!this.child) return;
     const hex = Buffer.from(bytes).toString('hex');
+    if (DEBUG) console.log('[tx]', hex);
     this.child.stdin.write(`${JSON.stringify({ type: 'write', hex })}\n`);
   }
 
@@ -69,9 +71,11 @@ class BluetoothBridge extends EventEmitter {
     }
     switch (msg.type) {
       case 'connected':
+        if (DEBUG) console.log('[connected]', msg.name, msg.address);
         this.emit('connected', { name: msg.name, address: msg.address });
         break;
       case 'data':
+        if (DEBUG) console.log('[rx]', msg.hex);
         this.emit('data', Buffer.from(msg.hex, 'hex'));
         break;
       case 'disconnected':

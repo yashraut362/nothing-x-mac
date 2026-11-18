@@ -20,6 +20,9 @@ const Command = {
   SET_LISTENING_MODE: 0xf01d,
   GET_CUSTOM_EQ: 0xc044,
   SET_CUSTOM_EQ: 0xf041,
+  // Advanced (multi-band) EQ: while enabled it overrides presets and custom EQ.
+  GET_ADVANCED_EQ: 0xc04c,
+  SET_ADVANCED_EQ: 0xf04f,
   GET_SPATIAL_AUDIO: 0xc04f,
   SET_SPATIAL_AUDIO: 0xf052,
   GET_DUAL_ENABLE: 0xc027,
@@ -45,6 +48,7 @@ const Response = {
   FIRMWARE: [0x4042],
   EQ_PRESET: [0x401f, 0x4050], // reply to GET_EQ / GET_LISTENING_MODE
   CUSTOM_EQ: [0x4044],
+  ADVANCED_EQ: [0x404c],
   SPATIAL_AUDIO: [0x404f],
   DUAL_ENABLE: [0x4027],
   DUAL_LIST: [0x4028],

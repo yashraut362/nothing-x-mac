@@ -5,6 +5,7 @@ const POPOVER_SYMBOLS = {
   budLeft: 'airpodpro.left',
   budRight: 'airpodpro.right',
   case: 'earbuds.case.fill',
+  headphones: 'headphones',
   anc: 'person.wave.2.fill',
   transparency: 'ear.and.waveform',
   off: 'person.fill',
