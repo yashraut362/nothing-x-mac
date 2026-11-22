@@ -29,10 +29,20 @@ class BluetoothBridge extends Emitter {
   async start() {
     if (this.#started) return;
     this.#started = true;
-    await this.#listen('bridge:message', (event) => this.#onMessage(event.payload));
+    let connectionEvents = 0;
+    await this.#listen('bridge:message', (event) => {
+      if (event.payload?.type === 'connected' || event.payload?.type === 'disconnected') {
+        connectionEvents++;
+      }
+      this.#onMessage(event.payload);
+    });
     // The earbuds may have connected before this page loaded.
+    const snapshotVersion = connectionEvents;
     const connection = await this.#invoke('bridge_connection');
-    if (connection) this.#onMessage({ type: 'connected', ...connection });
+    // Don't apply a potentially stale snapshot after a connection event.
+    if (connection && connectionEvents === snapshotVersion) {
+      this.#onMessage({ type: 'connected', ...connection });
+    }
   }
 
   // The shell owns the helper process and closes it cleanly on quit.
