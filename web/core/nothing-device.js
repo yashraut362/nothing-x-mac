@@ -40,6 +40,7 @@ function emptyState() {
       transparency: true, strengths: [], adaptive: false, bassSteps: 0, bassLevels: [],
       inEar: false, lowLatency: false, ring: 'buds', spatialModes: [],
       dualConnection: false, dualRestarts: false, personalSound: null, gestures: null,
+      form: null, color: null,
       eq: { style: 'eq', presets: [], customId: null, trebleHz: 3400 },
     },
   };

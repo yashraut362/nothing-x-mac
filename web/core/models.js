@@ -39,7 +39,7 @@ const MODELS = [
   { name: 'Nothing Ear (3)', anc: FULL, bass: 5, inEar: true, ring: 'buds', eq: 'nothing', treble: 3400, spatial: 6, dual: 'yes', sound: 'audiodo', gestures: null },
   { name: 'Nothing ear (1)', anc: 53, bass: 0, inEar: true, ring: 'single', eq: 'nothingNoCustom', treble: 3400, spatial: 0, dual: 'none', sound: null, gestures: null },
   { name: 'CMF Clip Pro', anc: FULL, bass: 3, inEar: false, ring: 'buds', eq: 'cmfNoDirac', treble: 3400, spatial: 6, dual: 'yes', sound: null, gestures: null },
-  { name: 'Neckband Pro', anc: FULL, bass: 5, inEar: false, ring: 'headphone', eq: 'nothing', treble: 6900, spatial: 6, dual: 'restart', sound: null, gestures: null },
+  { name: 'Neckband Pro', form: 'neckband', anc: FULL, bass: 5, inEar: false, ring: 'headphone', eq: 'nothing', treble: 6900, spatial: 6, dual: 'restart', sound: null, gestures: null },
   { name: 'Ear (Stick)', anc: 33, bass: 0, inEar: true, ring: 'buds', eq: 'nothing', treble: 3500, spatial: 0, dual: 'none', sound: null, gestures: null },
   { name: 'CMF Buds 2a', anc: 49, bass: 5, inEar: false, ring: 'buds', eq: 'cmfDirac7', treble: 6900, spatial: 0, dual: 'yes', sound: null, gestures: null },
   { name: 'CMF Buds 2', anc: FULL, bass: 5, inEar: true, ring: 'buds', eq: 'cmf', treble: 6900, spatial: 6, dual: 'yes', sound: null, gestures: 'cmfTap' },
@@ -48,6 +48,15 @@ const MODELS = [
   { name: 'Buds Pro', anc: 55, bass: 0, inEar: true, ring: 'buds', eq: 'nothing', treble: 3400, spatial: 0, dual: 'none', sound: null, gestures: null },
   { name: 'Ear (2)', anc: FULL, bass: 0, inEar: true, ring: 'buds', eq: 'nothing', treble: 3400, spatial: 0, dual: 'restart', sound: 'mimi', gestures: null },
 ].sort((a, b) => b.name.length - a.name.length); // longest first: "CMF Buds 2 Plus" before "CMF Buds"
+
+// Google Fast Pair model IDs (reported by the device over the Fast Pair
+// message stream) -> model name in MODELS and the product colour.
+// Identifies a renamed device and lets the panel draw it in its real colour.
+const FAST_PAIR_MODELS = {
+  '4DFC4A': { name: 'Neckband Pro', color: 'orange' },
+  '26C190': { name: 'Neckband Pro', color: 'white' },
+  'AE35FD': { name: 'Neckband Pro', color: 'black' },
+};
 
 // Unknown or renamed device: assume what current earbuds support.
 const DEFAULT_MODEL = { anc: FULL, bass: 5, inEar: true, ring: 'buds', eq: 'nothing', treble: 3400, spatial: 0, dual: 'yes', sound: null, gestures: null };
@@ -66,9 +75,13 @@ function modelForName(name = '') {
 //   spatialModes: [{ key, label }] ([] if none),
 //   dualConnection, dualRestarts, personalSound: 'mimi' | 'audiodo' | null,
 //   gestures: { sides, slots } | null,
+//   form: 'neckband' | null, color: 'orange' | 'white' | 'black' | null,
 // }
 function capabilitiesForName(name, modelId) {
-  const model = modelId === 'B192' ? MODELS.find((m) => m.id === modelId) : modelForName(name);
+  const fastPair = FAST_PAIR_MODELS[modelId?.toUpperCase?.()] ?? null;
+  const model = modelId === 'B192'
+    ? MODELS.find((m) => m.id === modelId)
+    : (fastPair && MODELS.find((m) => m.name === fastPair.name)) ?? modelForName(name);
   const { anc, bass, inEar, ring, eq, treble, spatial, dual, sound, gestures } = model;
   const hasBase = Boolean(anc & ANC_BIT.STRENGTH_BASE);
   const hasMid = Boolean(anc & ANC_BIT.STRENGTH_MID);
@@ -78,6 +91,8 @@ function capabilitiesForName(name, modelId) {
 
   return {
     pro: model.id === 'B192',
+    form: model.form ?? null,
+    color: fastPair?.color ?? null, // only known from the model ID
     transparency: Boolean(anc & ANC_BIT.TRANSPARENCY),
     strengths,
     adaptive: hasBase && Boolean(anc & ANC_BIT.ADAPTIVE),

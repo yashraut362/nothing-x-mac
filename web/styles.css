@@ -146,6 +146,32 @@ hr {
 .bud.clickable:active { background: var(--chip); }
 .bud-icon { width: 34px; height: 34px; margin-bottom: 2px; }
 .bud-label { font-size: 11px; color: var(--text-secondary); }
+
+/* Neckband illustration (index.html), drawn in the product colour. */
+.bud-icon.neckband-icon { width: 56px; height: 56px; margin: -4px 0 -2px; }
+.neckband-icon {                       /* colour unknown: neutral grey */
+  --device-color: #9a9aa0; --device-band: #8e8e94; --device-shade: #6e6e74;
+  --device-edge: rgba(0, 0, 0, 0.12);
+}
+/* Orange: the band and cables are a deeper red than the pods and buds. */
+.neckband-icon[data-color="orange"] {
+  --device-color: #f2622e; --device-band: #e2362c; --device-shade: #b8401c;
+  --device-edge: rgba(0, 0, 0, 0.1);
+}
+.neckband-icon[data-color="white"] {
+  --device-color: #ededeb; --device-band: #e2e2e0; --device-shade: #b4b4b2;
+  --device-edge: rgba(0, 0, 0, 0.28);
+}
+.neckband-icon[data-color="black"] {
+  --device-color: #2e2e31; --device-band: #28282b; --device-shade: #161618;
+  --device-edge: rgba(0, 0, 0, 0);
+}
+@media (prefers-color-scheme: dark) {
+  .neckband-icon { --device-edge: rgba(255, 255, 255, 0.12); }
+  .neckband-icon[data-color="orange"],
+  .neckband-icon[data-color="white"] { --device-edge: rgba(255, 255, 255, 0); }
+  .neckband-icon[data-color="black"] { --device-edge: rgba(255, 255, 255, 0.36); }
+}
 .bud-level {
   display: flex;
   align-items: center;

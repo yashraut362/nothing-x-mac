@@ -4,7 +4,7 @@
 // Most models use RFCOMM. ProBluetooth handles the B192's GATT transport.
 // It knows nothing about the earbud protocol itself; that lives in web/core/.
 //
-// stdout events:  {"type":"connected","name":"…","address":"…"}
+// stdout events:  {"type":"connected","name":"…","address":"…","modelId":"…"?}
 //                 {"type":"data","hex":"55…"}
 //                 {"type":"disconnected"}
 //                 {"type":"log","message":"…"}
@@ -22,6 +22,82 @@ let serviceUUIDBytes: [UInt8] = [
     0x84, 0x3A, 0x34, 0x48, 0x7C, 0xF1, 0x33, 0xEB,
 ]
 let scanInterval: TimeInterval = 3
+
+// Google Fast Pair Message Stream (RFCOMM). On open the device sends a
+// "Device Information / Model ID" message, which identifies the exact model
+// and colour (e.g. 4DFC4A = CMF Neckband Pro, Orange).
+let fastPairStreamUUIDBytes: [UInt8] = [
+    0xDF, 0x21, 0xFE, 0x2C, 0x25, 0x15, 0x4F, 0xDB,
+    0x88, 0x86, 0xF1, 0x2C, 0x4D, 0x67, 0x92, 0x7C,
+]
+let modelIDTimeout: TimeInterval = 1.5
+
+// Opens the Fast Pair stream just long enough to read the model ID, then
+// closes it. Calls `done` exactly once, with nil if the device has no such
+// service or doesn't answer in time.
+final class ModelIDReader: NSObject, IOBluetoothRFCOMMChannelDelegate {
+    private var channel: IOBluetoothRFCOMMChannel?
+    private var buffer = [UInt8]()
+    private var done: ((String?) -> Void)?
+    private var generation = 0
+    private let uuid = IOBluetoothSDPUUID(bytes: fastPairStreamUUIDBytes, length: fastPairStreamUUIDBytes.count)
+
+    func read(from device: IOBluetoothDevice, done: @escaping (String?) -> Void) {
+        cancel() // a reconnect replaces any read still in progress
+        generation += 1
+        let current = generation
+        buffer = []
+        self.done = done
+        var channelID: BluetoothRFCOMMChannelID = 0
+        guard let record = device.getServiceRecord(for: uuid),
+              record.getRFCOMMChannelID(&channelID) == kIOReturnSuccess,
+              device.openRFCOMMChannelAsync(&channel, withChannelID: channelID, delegate: self) == kIOReturnSuccess
+        else { return finish(nil) }
+        DispatchQueue.main.asyncAfter(deadline: .now() + modelIDTimeout) { [weak self] in
+            if self?.generation == current { self?.finish(nil) }
+        }
+    }
+
+    func cancel() {
+        done = nil
+        finish(nil)
+    }
+
+    private func finish(_ modelID: String?) {
+        if let channel {
+            self.channel = nil
+            channel.setDelegate(nil)
+            channel.close()
+        }
+        let done = self.done
+        self.done = nil
+        done?(modelID)
+    }
+
+    // Messages: [group, code, length (2 bytes, big-endian), data…].
+    // Model ID is group 0x03 (device information), code 0x01, 3 bytes.
+    func rfcommChannelData(_ rfcommChannel: IOBluetoothRFCOMMChannel!,
+                           data dataPointer: UnsafeMutableRawPointer!,
+                           length dataLength: Int) {
+        buffer += UnsafeBufferPointer(start: dataPointer.assumingMemoryBound(to: UInt8.self), count: dataLength)
+        while buffer.count >= 4 {
+            let length = Int(buffer[2]) << 8 | Int(buffer[3])
+            guard buffer.count >= 4 + length else { return }
+            let message = Array(buffer[0..<(4 + length)])
+            buffer.removeFirst(4 + length)
+            if message[0] == 0x03, message[1] == 0x01, length == 3 {
+                return finish(message[4...].map { String(format: "%02X", $0) }.joined())
+            }
+        }
+        if buffer.count > 512 { finish(nil) } // not a message stream after all
+    }
+
+    func rfcommChannelClosed(_ rfcommChannel: IOBluetoothRFCOMMChannel!) {
+        guard rfcommChannel === channel else { return }
+        channel = nil
+        finish(nil)
+    }
+}
 
 func emit(_ object: [String: Any]) {
     guard let data = try? JSONSerialization.data(withJSONObject: object) else { return }
@@ -58,6 +134,13 @@ final class Bridge: NSObject, IOBluetoothRFCOMMChannelDelegate {
     private var shuttingDown = false
     private var scanSummary = ""
     private let pro = ProBluetooth()
+    private let modelReader = ModelIDReader()
+    // Fast Pair model ID per device address, read once per run. Read BEFORE
+    // the control channel opens: opening and closing the Fast Pair channel
+    // while the control channel is open breaks writes on the CMF Neckband Pro.
+    // A nil value means "read, but no ID" so it isn't retried.
+    private var modelIDs: [String: String?] = [:]
+    private var identifying = false
     private let serviceUUID = IOBluetoothSDPUUID(bytes: serviceUUIDBytes, length: serviceUUIDBytes.count)
 
     func start() {
@@ -69,7 +152,7 @@ final class Bridge: NSObject, IOBluetoothRFCOMMChannelDelegate {
 
     // Look for a connected paired device that offers the control service.
     private func scan() {
-        guard channel == nil, !shuttingDown else { return }
+        guard channel == nil, !shuttingDown, !identifying else { return }
         let paired = IOBluetoothDevice.pairedDevices() as? [IOBluetoothDevice] ?? []
         if ProcessInfo.processInfo.environment["NXM_DEBUG"] != nil {
             let connected = paired.filter { $0.isConnected() }.count
@@ -107,6 +190,22 @@ final class Bridge: NSObject, IOBluetoothRFCOMMChannelDelegate {
             guard record.getRFCOMMChannelID(&channelID) == kIOReturnSuccess else { continue }
 
             let address = candidate.addressString ?? ""
+            if modelIDs[address] == nil {
+                // Identify first, then come back here to open the control channel.
+                identifying = true
+                modelReader.read(from: candidate) { [weak self] modelID in
+                    guard let self else { return }
+                    self.modelIDs[address] = .some(modelID)
+                    // Let the Fast Pair channel finish closing before the next
+                    // open; stay `identifying` so the scan timer waits too.
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                        self.identifying = false
+                        if !self.shuttingDown { self.scan() }
+                    }
+                }
+                return
+            }
+
             var opened: IOBluetoothRFCOMMChannel?
             let status = candidate.openRFCOMMChannelSync(&opened, withChannelID: channelID, delegate: self)
             guard status == kIOReturnSuccess, let opened else {
@@ -119,11 +218,13 @@ final class Bridge: NSObject, IOBluetoothRFCOMMChannelDelegate {
             pro.close()
             channel = opened
             device = candidate
-            emit([
+            var message: [String: Any] = [
                 "type": "connected",
                 "name": candidate.name ?? candidate.nameOrAddress ?? "Earbuds",
-                "address": candidate.addressString ?? "",
-            ])
+                "address": address,
+            ]
+            if let modelID = modelIDs[address] ?? nil { message["modelId"] = modelID }
+            emit(message)
             return
         }
         pro.scan(connectedNames: names)
@@ -157,6 +258,7 @@ final class Bridge: NSObject, IOBluetoothRFCOMMChannelDelegate {
     func shutdown() {
         guard !shuttingDown else { return }
         shuttingDown = true
+        modelReader.cancel()
         pro.close()
         if let channel {
             self.channel = nil

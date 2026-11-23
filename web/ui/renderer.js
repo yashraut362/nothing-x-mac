@@ -49,6 +49,23 @@ function renderBattery(battery, caps) {
   }
 }
 
+const COLOR_NAMES = { orange: 'Orange', white: 'White', black: 'Black' };
+
+// Single-battery devices: a neckband gets its own glyph in its real colour;
+// everything else keeps the headphones symbol.
+function renderStereoIcon(caps) {
+  const bud = $('.bud[data-part="stereo"]');
+  const neckband = caps.form === 'neckband';
+  bud.querySelector('.sym.bud-icon').hidden = neckband;
+  const icon = bud.querySelector('.neckband-icon');
+  // An <svg> has no .hidden property; toggle the attribute itself.
+  icon.toggleAttribute('hidden', !neckband);
+  if (caps.color) icon.dataset.color = caps.color;
+  else delete icon.dataset.color;
+  bud.querySelector('.bud-label').textContent = neckband ? 'Neckband' : 'Headphones';
+  bud.title = neckband && caps.color ? `Neckband · ${COLOR_NAMES[caps.color]}` : '';
+}
+
 function renderNoiseMode(mode) {
   for (const btn of document.querySelectorAll('.option')) {
     btn.setAttribute('aria-checked', String(btn.dataset.mode === mode));
@@ -62,6 +79,7 @@ function renderCapabilities(capabilities) {
 function render(state) {
   renderHeader(state);
   renderBattery(state.battery, state.capabilities);
+  renderStereoIcon(state.capabilities);
   const locked = state.capabilities.pro && state.flatEq !== false;
   $('.option[data-mode="transparency"]').disabled = Boolean(locked);
   const flatStatus = $('#flat-eq-status');
