@@ -91,30 +91,44 @@ const NOISE_CODES = [
   { code: 0x07, mode: 'transparency', strength: null },
 ];
 
-// payload: [?, code, ...] -> { mode, strength } or null
-function decodeNoiseMode(payload) {
-  const entry = NOISE_CODES.find((e) => e.code === payload[1]);
-  return entry ? { mode: entry.mode, strength: entry.strength } : null;
+// Newer firmware reports Transparency as 0xfe and Off as 0x00 instead of the
+// codes it accepts on writes (0x07 / 0x05). Accept both spellings everywhere,
+// otherwise a Transparency report is silently dropped and the panel keeps
+// showing the previous mode.
+function noiseEntry(value) {
+  const code = value === 0xfe ? 0x07 : value === 0x00 ? 0x05 : value;
+  return NOISE_CODES.find((e) => e.code === code) ?? null;
 }
 
-function decodeProNoiseMode(payload, previous = {}) {
-  let { mode, strength } = previous;
-  let changed = false;
+// Noise reports are a list of 3-byte entries [type, code, 0]:
+//   type 1: the current mode (an ANC code carries its strength)
+//   type 2: the ANC strength, remembered even while ANC is off
+// in any order, e.g. a GET reply from the CMF Neckband Pro in Transparency is
+// [2, 4, 0, 1, 7, 0] (strength Adaptive, mode Transparency) and a push after
+// the neckband's button is [1, 7, 0]. Reading only payload[1] would take the
+// remembered strength for the mode, so every entry is decoded.
+// previous fills in what a report leaves out (a strength-only push).
+function decodeNoiseMode(payload, previous = {}) {
+  let modeEntry = null;
+  let strengthEntry = null;
   for (let at = 0; at + 1 < payload.length; at += 3) {
-    const type = payload[at];
-    const value = payload[at + 1];
-    const code = value === 0xfe ? 7 : value === 0 ? 5 : value;
-    const entry = NOISE_CODES.find((e) => e.code === code);
-    if (type === 1 && entry) {
-      ({ mode, strength } = entry);
-      changed = true;
-    } else if (type === 2 && mode === 'anc' && entry?.mode === 'anc') {
-      strength = entry.strength;
-      changed = true;
-    }
+    const entry = noiseEntry(payload[at + 1]);
+    if (payload[at] === 1 && entry) modeEntry = entry;
+    else if (payload[at] === 2 && entry?.mode === 'anc') strengthEntry = entry;
   }
-  return changed ? { mode, strength } : null;
+  if (!modeEntry && !strengthEntry) {
+    // Older firmware without type tags: the code is the second byte.
+    const legacy = noiseEntry(payload[1]);
+    return legacy ? { mode: legacy.mode, strength: legacy.strength } : null;
+  }
+  const mode = modeEntry?.mode ?? previous.mode ?? null;
+  if (mode !== 'anc') return mode ? { mode, strength: null } : null;
+  const strength = strengthEntry?.strength ?? modeEntry?.strength ?? previous.strength ?? 'high';
+  return { mode, strength };
 }
+
+// Kept for callers and tests that name the Pro variant; the format is shared.
+const decodeProNoiseMode = decodeNoiseMode;
 
 // strength only matters for mode "anc"; it defaults to high.
 function encodeNoiseMode(mode, strength = 'high') {

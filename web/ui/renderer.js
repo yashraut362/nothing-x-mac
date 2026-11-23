@@ -12,9 +12,17 @@ let dualConnection = null;
 let controls = null;
 let equalizer = null;
 
+// Latest device state the panel was drawn from.
+let lastState = null;
+
 // One switch at a time across mode buttons and intensity segments.
 const switchLock = window.createSwitchLock({
-  onToggle: (locked) => document.getElementById('noise-section').classList.toggle('busy', locked),
+  onToggle: (locked) => {
+    document.getElementById('noise-section').classList.toggle('busy', locked);
+    // Unlocking (confirmed, rejected or timed out) drops any optimistic
+    // selection: redraw the noise controls from what the device reported.
+    if (!locked && lastState) renderNoise(lastState);
+  },
 });
 
 const $ = (sel) => document.querySelector(sel);
@@ -59,7 +67,13 @@ function renderCapabilities(capabilities) {
   $('.option[data-mode="transparency"]').hidden = !capabilities.transparency;
 }
 
+function renderNoise(state) {
+  renderNoiseMode(state.noiseMode);
+  strengthControl?.render(state);
+}
+
 function render(state) {
+  lastState = state;
   renderHeader(state);
   renderBattery(state.battery, state.capabilities);
   const locked = state.capabilities.pro && state.flatEq !== false;
@@ -69,8 +83,7 @@ function render(state) {
   flatStatus.textContent = state.flatEq ? 'Flat EQ is on. Use the left earcup switch to restore Transparency, EQ and Spatial Audio.' : 'Reading the Flat EQ switch…';
   renderCapabilities(state.capabilities);
   switchLock.sync(state.noisePending);
-  renderNoiseMode(state.noiseMode);
-  strengthControl.render(state);
+  renderNoise(state);
   bassControl.render(state);
   quickSettings.render(state);
   spatialAudio.render(state);
@@ -107,7 +120,9 @@ async function main() {
   strengthControl = window.createStrengthControl({
     symbols,
     lock: switchLock,
-    onChange: (strength) => nx.setAncStrength(strength),
+    onChange: (strength) => {
+      if (!nx.setAncStrength(strength)) switchLock.sync(false);
+    },
   });
   bassControl = window.createBassControl({
     symbols,
@@ -121,14 +136,26 @@ async function main() {
   equalizer = window.createEqualizer({ api: nx, views, symbols });
 
   render(device);
-  nx.onDeviceState(render);
+  // Coalesce bursts of state changes (start-up reads, retries) into one
+  // repaint per frame.
+  let queued = null;
+  nx.onDeviceState((state) => {
+    if (!queued) requestAnimationFrame(() => {
+      const next = queued;
+      queued = null;
+      render(next);
+    });
+    queued = state;
+  });
 
   $('#noise-options').addEventListener('click', (e) => {
     const btn = e.target.closest('.option');
     if (!btn || switchLock.locked || btn.getAttribute('aria-checked') === 'true') return;
     switchLock.lock(); // no more changes until the buds confirm this one
     renderNoiseMode(btn.dataset.mode);
-    nx.setNoiseMode(btn.dataset.mode);
+    // Not sent (already in that mode, or another switch still in flight):
+    // unlock, which redraws the real mode.
+    if (!nx.setNoiseMode(btn.dataset.mode)) switchLock.sync(false);
   });
 
   $('#quit').addEventListener('click', () => nx.quit());

@@ -9,7 +9,7 @@
 import { Emitter } from './emitter.js';
 import { encodeFrame, FrameParser } from './protocol.js';
 import {
-  Command, Response, decodeBattery, decodeNoiseMode, decodeProNoiseMode, encodeNoiseMode, decodeBass, encodeBass,
+  Command, Response, decodeBattery, decodeNoiseMode, encodeNoiseMode, decodeBass, encodeBass,
 } from './commands.js';
 import { capabilitiesForName, bassLevels } from './models.js';
 import { ConfirmedSetting } from './confirmed-setting.js';
@@ -57,10 +57,17 @@ class NothingDevice extends Emitter {
     // Strength to use when noise cancellation is turned back on.
     this.lastAncStrength = 'high';
 
+    // Last noise state the earbuds actually reported. The UI may show a
+    // requested mode ahead of confirmation; if that never comes, fall back here.
+    this.confirmedNoise = null;
+
     this.noise = new ConfirmedSetting({
       read: () => this.#send(Command.GET_NOISE_MODE),
       matches: (r, t) => r.mode === t.mode && (r.mode !== 'anc' || r.strength === t.strength),
-      onTimeout: () => this.#update({ noisePending: false }),
+      onTimeout: () => {
+        const { mode = null, strength = null } = this.confirmedNoise ?? {};
+        this.#update({ noiseMode: mode, ancStrength: mode === 'anc' ? strength : null, noisePending: false });
+      },
     });
     this.bassSetting = new ConfirmedSetting({
       read: () => this.#send(Command.GET_BASS),
@@ -111,19 +118,23 @@ class NothingDevice extends Emitter {
 
   // Setters ignore requests while a previous change of the same kind is still
   // in flight, so rapid clicks can't queue up commands on the earbuds.
+  // Noise setters return true if a change was sent; on false the UI must drop
+  // its optimistic selection and re-render from state.
 
   setNoiseMode(mode) {
-    if (!this.state.connected || this.noise.pending || mode === this.state.noiseMode) return;
-    if (this.state.capabilities.pro && mode === 'transparency' && this.state.flatEq !== false) return;
+    if (!this.state.connected || this.noise.pending || mode === this.state.noiseMode) return false;
+    if (this.state.capabilities.pro && mode === 'transparency' && this.state.flatEq !== false) return false;
     const strength = mode === 'anc' ? this.#usableStrength(this.lastAncStrength) : null;
     this.#applyNoise(mode, strength);
+    return true;
   }
 
   // 'low' | 'mid' | 'high' | 'adaptive'
   setAncStrength(strength) {
-    if (!this.state.connected || this.noise.pending) return;
-    if (this.state.noiseMode === 'anc' && strength === this.state.ancStrength) return;
+    if (!this.state.connected || this.noise.pending) return false;
+    if (this.state.noiseMode === 'anc' && strength === this.state.ancStrength) return false;
     this.#applyNoise('anc', this.#usableStrength(strength));
+    return true;
   }
 
   // { enabled?: boolean, level?: number } — missing fields keep their current value.
@@ -146,12 +157,16 @@ class NothingDevice extends Emitter {
     this.#send(Command.GET_BATTERY);
   }
 
+  // Called whenever the panel opens. The mode may have changed from the
+  // earbuds' own controls or another device while the panel was closed, and
+  // not every model pushes that, so read it back instead of trusting the cache.
   refreshPanel() {
     this.refreshBattery();
+    if (!this.noise.pending) this.#send(Command.GET_NOISE_MODE);
+    if (this.state.capabilities.bassSteps && !this.bassSetting.pending) this.#send(Command.GET_BASS);
     if (this.state.capabilities.pro) {
       this.#send(Command.GET_FLAT_EQ);
       this.#send(Command.GET_ADVANCED_EQ);
-      this.#send(Command.GET_NOISE_MODE);
     }
   }
 
@@ -232,6 +247,9 @@ class NothingDevice extends Emitter {
   }
 
   #onNoiseReport(report) {
+    // Every report is the earbuds' truth, even one that doesn't confirm a
+    // pending change yet: remember it for the timeout fallback.
+    this.confirmedNoise = { mode: report.mode, strength: report.strength };
     if (this.noise.accept(report)) this.#setNoiseState(report.mode, report.strength);
   }
 
@@ -308,6 +326,7 @@ class NothingDevice extends Emitter {
 
   #onDisconnected() {
     this.lastAncStrength = 'high';
+    this.confirmedNoise = null;
     this.#clearTimers();
     this.parser.reset();
     if (this.state.connected) {
@@ -322,10 +341,9 @@ class NothingDevice extends Emitter {
       if (Response.BATTERY.includes(frame.command)) {
         this.#update({ battery: decodeBattery(frame.payload) });
       } else if (Response.NOISE_MODE.includes(frame.command)) {
-        const report = this.state.capabilities.pro
-          ? decodeProNoiseMode(frame.payload, { mode: this.state.noiseMode, strength: this.state.ancStrength })
-          : decodeNoiseMode(frame.payload);
+        const report = decodeNoiseMode(frame.payload, this.confirmedNoise ?? {});
         if (report) this.#onNoiseReport(report);
+        else console.warn('[nx] unrecognised noise report', frame.command.toString(16), [...frame.payload]);
       } else if (Response.BASS.includes(frame.command)) {
         if (this.state.capabilities.bassSteps) this.#onBassReport(frame.payload);
       } else if (this.state.capabilities.pro && Response.FLAT_EQ.includes(frame.command)) {

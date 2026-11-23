@@ -5,8 +5,8 @@
 // ignored and the value is read again shortly. If no confirmation arrives in
 // time, the pending state is dropped and the next report is trusted.
 
-const FIRST_READ_MS = 400;
-const RETRY_MS = 500;
+const FIRST_READ_MS = 150;
+const RETRY_MS = 400;
 const TIMEOUT_MS = 4_000;
 
 class ConfirmedSetting {
